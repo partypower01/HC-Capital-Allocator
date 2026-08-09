@@ -6,3 +6,4 @@ dist/
 *.d.ts.map
 .env
 *.log
+.DS_Store
