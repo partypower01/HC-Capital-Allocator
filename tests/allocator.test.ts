@@ -153,10 +153,11 @@ describe('USDT sizing from portfolio state', () => {
     expect(r.allocation_usdt).toBeCloseTo(300, 6);
   });
 
-  test('zero balance yields a zero-sized (but approved) allocation', () => {
+  test('zero balance is rejected (no zero-sized approvals)', () => {
     const r = allocator.allocate(consensus(95, 99), portfolio(0, 0), 'NORMAL');
-    expect(r.status).toBe('APPROVED');
+    expect(r.status).toBe('REJECTED');
     expect(r.allocation_usdt).toBe(0);
+    expect(r.reason).toContain('No available balance');
   });
 
   test('scales linearly with available balance', () => {
@@ -199,17 +200,57 @@ describe('identity propagation', () => {
   });
 });
 
-describe('known gap: total_exposure >= 100%', () => {
-  // BUG (not fixed here, needs a product decision): virtualAUM divides by
-  // (1 - total_exposure/100). At exactly 100% exposure allocation_usdt is
-  // Infinity, above 100% it turns negative, and both are still APPROVED.
-  // Near 100% (e.g. 99%) the implied AUM explodes to 100x the balance.
-  // Run with `bun test --todo` to see it fail.
-  test.todo('allocation_usdt stays finite and non-negative at >= 100% exposure', () => {
-    for (const exposure of [100, 120]) {
-      const r = allocator.allocate(consensus(95, 99), portfolio(1_000, exposure), 'NORMAL');
-      expect(Number.isFinite(r.allocation_usdt)).toBe(true);
-      expect(r.allocation_usdt).toBeGreaterThanOrEqual(0);
+describe('exposure bug fix: total_exposure >= 100% (was Infinity / negative / 100x)', () => {
+  // Previously virtualAUM = available / (1 - exposure/100) was used blindly:
+  // 100% -> Infinity, >100% -> negative, both APPROVED; 99% -> 100x balance.
+  test.each([100, 100.0001, 120, 1_000])('exposure %p%% is REJECTED with a zero size', (exposure) => {
+    const r = allocator.allocate(consensus(95, 99), portfolio(1_000, exposure), 'NORMAL');
+    expect(r.status).toBe('REJECTED');
+    expect(r.allocation_usdt).toBe(0);
+    expect(r.allocation_pct).toBe(0);
+    expect(r.reason).toContain('leaves no room');
+  });
+
+  test.each([NaN, Infinity, -Infinity, -1])('invalid exposure %p is REJECTED', (exposure) => {
+    const r = allocator.allocate(consensus(95, 99), portfolio(1_000, exposure), 'NORMAL');
+    expect(r.status).toBe('REJECTED');
+    expect(r.allocation_usdt).toBe(0);
+  });
+
+  test.each([-5, NaN, Infinity, -Infinity])('invalid/negative available balance %p is REJECTED', (bal) => {
+    const r = allocator.allocate(consensus(95, 99), portfolio(bal, 10), 'NORMAL');
+    expect(r.status).toBe('REJECTED');
+    expect(r.allocation_usdt).toBe(0);
+  });
+
+  test('99% exposure: size is capped to the available balance (REDUCED), never 100x it', () => {
+    // implied AUM = 1_000 / 0.01 = 100_000 -> 3% = 3_000 > 1_000 available
+    const r = allocator.allocate(consensus(95, 99), portfolio(1_000, 99), 'NORMAL');
+    expect(r.status).toBe('REDUCED');
+    expect(r.allocation_usdt).toBeCloseTo(1_000, 6);
+    expect(r.allocation_pct).toBeCloseTo(1, 6); // 1_000 of 100_000
+    expect(r.reason).toContain('available balance');
+  });
+
+  test('97% is the boundary: 3% of implied AUM equals the available balance exactly', () => {
+    const r = allocator.allocate(consensus(95, 99), portfolio(300, 97), 'NORMAL');
+    expect(r.allocation_usdt).toBeCloseTo(300, 6);
+    expect(r.allocation_usdt).toBeLessThanOrEqual(300);
+  });
+
+  test('property: for any exposure/balance the size is finite, >= 0 and <= available', () => {
+    const exposures = [0, 1, 10, 50, 90, 96.9, 97, 97.1, 99, 99.9, 99.9999, 100, 101, 150];
+    const balances = [0.01, 1, 100, 10_000, 1e9];
+    for (const e of exposures) {
+      for (const b of balances) {
+        for (const [a, c] of [[95, 99], [85, 92], [55, 85]]) {
+          const r = allocator.allocate(consensus(a!, c!), portfolio(b, e), 'NORMAL');
+          expect(Number.isFinite(r.allocation_usdt)).toBe(true);
+          expect(r.allocation_usdt).toBeGreaterThanOrEqual(0);
+          expect(r.allocation_usdt).toBeLessThanOrEqual(b + 1e-9);
+          if (e >= 100) expect(r.status).toBe('REJECTED');
+        }
+      }
     }
   });
 });

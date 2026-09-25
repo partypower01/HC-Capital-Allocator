@@ -1,5 +1,8 @@
 import { HCEventBus } from './bus/bus.js';
 import { CapitalAllocator } from './allocator.js';
+import { loadCapitalLimitsFromEnv } from './capital-limits.js';
+import { RiskSettingsProvider, FAIL_CLOSED_PROVIDER, createSettingsProviderFromEnv } from './settings-provider.js';
+import { DeployedCapitalTracker, accountKey, DEFAULT_UNFILLED_TTL_MS } from './deployed-capital.js';
 import { 
   ConsensusDecision, 
   PortfolioState, 
@@ -13,37 +16,70 @@ class CapitalAllocatorService {
   private allocator: CapitalAllocator;
   private portfolios: Map<string, PortfolioState> = new Map();
   private cpmState: Map<string, CapitalPreservationMode> = new Map();
+  private settings: RiskSettingsProvider = FAIL_CLOSED_PROVIDER;
+  private deployed: DeployedCapitalTracker;
 
   constructor() {
     this.bus = new HCEventBus({ 
       groupName: 'hc-capital-allocator-group' 
     });
     this.allocator = new CapitalAllocator();
+    const ttl = Number(process.env.HC_ALLOCATOR_UNFILLED_TTL_MS);
+    this.deployed = new DeployedCapitalTracker(Number.isFinite(ttl) && ttl > 0 ? ttl : DEFAULT_UNFILLED_TTL_MS);
   }
 
   async start() {
     console.log('HC-Capital-Allocator starting...');
 
-    // Subscribe to PortfolioUpdates to keep local state
-    await this.bus.subscribe('allocator-portfolio-sync', async (event: EventEnvelope) => {
-      const portfolio = event.payload as PortfolioState;
-      const key = `${portfolio.account_id}:${portfolio.environment}`;
-      this.portfolios.set(key, portfolio);
-      console.log(`Updated local portfolio cache for ${key}`);
-    }, ['PortfolioUpdate']);
+    // Per-user capital limits (dashboard account_risk_settings by default).
+    this.settings = await createSettingsProviderFromEnv(process.env, (s) => import(s), loadCapitalLimitsFromEnv);
 
-    // Subscribe to CPM changes (if we had a specific event, for now let's assume it comes in via StateChange or similar)
-    // Or we just listen to a 'CPMUpdate' event
-    await this.bus.subscribe('allocator-cpm-sync', async (event: EventEnvelope) => {
-      const { environment, mode } = event.payload;
-      this.cpmState.set(environment, mode);
-      console.log(`CPM Mode for ${environment} set to ${mode}`);
-    }, ['CPMUpdate']);
-
-    // Subscribe to ConsensusDecisions to perform allocation
-    await this.bus.subscribe('allocator-decision-engine', this.handleConsensus.bind(this), ['ConsensusDecision']);
+    // ONE consumer for all event types. HCEventBus uses a single consumer
+    // group per service, and Redis delivers each stream entry to only one
+    // consumer of a group (non-matching types are acked and dropped). With
+    // one consumer per type, most PortfolioUpdate/CPMUpdate/ConsensusDecision
+    // events were silently lost to the "wrong" consumer.
+    await this.bus.subscribe('allocator-main', this.handleEvent.bind(this), [
+      'PortfolioUpdate',
+      'CPMUpdate',
+      'ExecutionReport',
+      'PositionClosed',
+      'ConsensusDecision',
+    ]);
 
     console.log('HC-Capital-Allocator is operational.');
+  }
+
+  private async handleEvent(event: EventEnvelope) {
+    switch (event.event_type) {
+      case 'PortfolioUpdate': {
+        // Keep local portfolio state
+        const portfolio = event.payload as PortfolioState;
+        const key = `${portfolio.account_id}:${portfolio.environment}`;
+        this.portfolios.set(key, portfolio);
+        console.log(`Updated local portfolio cache for ${key}`);
+        break;
+      }
+      case 'CPMUpdate': {
+        const { environment, mode } = event.payload;
+        this.cpmState.set(environment, mode);
+        console.log(`CPM Mode for ${environment} set to ${mode}`);
+        break;
+      }
+      // Per-user capital tracking: release reservations when the order
+      // failed or the position closed (see deployed-capital.ts for limitations).
+      case 'ExecutionReport':
+        this.deployed.onExecutionReport(event.correlation_id, String(event.payload?.status ?? ''));
+        break;
+      case 'PositionClosed':
+        this.deployed.onPositionClosed(event.correlation_id);
+        break;
+      case 'ConsensusDecision':
+        await this.handleConsensus(event);
+        break;
+      default:
+        break;
+    }
   }
 
   private async handleConsensus(event: EventEnvelope) {
@@ -62,7 +98,16 @@ class CapitalAllocatorService {
       return;
     }
 
-    const allocation = this.allocator.allocate(consensus, portfolio, cpm);
+    const { user_key, limit } = await this.settings.resolve(account_id, environment);
+    const trackKey = accountKey(user_key, environment);
+    const allocation = this.allocator.allocateForUser(consensus, portfolio, cpm, {
+      limit,
+      deployed_usdt: this.deployed.deployed(trackKey, Date.now()),
+    });
+
+    if (allocation.status !== 'REJECTED' && allocation.allocation_usdt > 0) {
+      this.deployed.reserve(trackKey, correlation_id, allocation.allocation_usdt, Date.now());
+    }
     
     // Enrich with multi-account metadata
     const finalAllocation: AllocationDecision = {
