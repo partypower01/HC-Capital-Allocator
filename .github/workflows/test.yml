@@ -1,6 +1,15 @@
 name: Test
 
-on: [push, pull_request]
+# CI minutes (owner B005, 2026-09-29): run on main and on PRs only, not on every branch push (the
+# sessions run the full suite locally before each push), and cancel a superseded run on the same ref.
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   test:
