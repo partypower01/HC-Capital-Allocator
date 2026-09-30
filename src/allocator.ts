@@ -1,3 +1,4 @@
+// HC-Capital-Allocator core: the CapitalAllocator computes position size from the Consensus score, confidence, portfolio state and Capital-Preservation-Mode, capped at HARD_CAP_PCT (3%) of the portfolio.
 import { ConsensusDecision, PortfolioState, AllocationDecision, CapitalPreservationMode } from './types.js';
 import { DEFAULT_MIN_ALLOCATION_USDT, UserCapitalLimit } from './capital-limits.js';
 

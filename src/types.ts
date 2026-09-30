@@ -1,3 +1,4 @@
+// HC-Capital-Allocator — shared types (MarketSnapshot, ConsensusDecision, PortfolioState, AllocationDecision, CapitalPreservationMode, EventEnvelope) for the allocation logic.
 export interface MarketSnapshot {
   symbol: string;
   timestamp: string;

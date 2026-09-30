@@ -1,3 +1,4 @@
+// HC-Capital-Allocator — local HCEventBus client (ioredis streams): publishes/consumes EventEnvelopes via a consumer group. Config: redisUrl/streamName/groupName.
 import Redis from 'ioredis';
 import { v4 as uuidv4 } from 'uuid';
 import { EventEnvelope } from '../types.js';

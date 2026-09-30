@@ -1,3 +1,4 @@
+// HC-Capital-Allocator entrypoint: wires the CapitalAllocator to the HCEventBus (Redis) — consumes ConsensusDecisions + PortfolioState, emits AllocationDecisions. Config: REDIS_URL.
 import { HCEventBus } from './bus/bus.js';
 import { CapitalAllocator } from './allocator.js';
 import { loadCapitalLimitsFromEnv } from './capital-limits.js';
